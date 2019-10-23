@@ -1,0 +1,32 @@
+#video {
+	position: fixed;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1px;
+	opacity: 0.00000001;
+	pointer-events: none;
+	line-height: 1px;
+/*	width: 1280px;
+	height: 720px;*/
+}
+
+#canvas1 {
+	display: none;
+  position: absolute;
+}
+
+#canvas2 {
+  /* display: none; */
+  position: absolute;
+}
+
+#play-video {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+}
+
+#play-video.hidden {
+	display: none;
+}

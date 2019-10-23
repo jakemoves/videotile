@@ -1,0 +1,12 @@
+{
+  "name": "videotile",
+  "dependencies": {
+    "body-parser": "^1.18.3",
+    "express": "^4.16.3",
+    "lodash": "^4.17.10",
+    "normalize.css": "^8.0.0",
+    "tight-sprite": "^0.1.5",
+    "uuid": "^3.3.2",
+    "ws": "^6.0.0"
+  }
+}

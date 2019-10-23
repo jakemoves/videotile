@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<head>
+	<link href="normalize.css" rel="stylesheet"> 
+	<!-- <link href="stylesheet.css" rel="stylesheet">  -->
+  <!-- <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"> -->
+  <script src="matter-js-0.14.2.js"></script>
+</head>
+<body>
+  <div id="view-container">
+    <!-- <div id="img-container">
+      <img id="video-frame" src="images/testpattern.jpg" alt="" width=1920px height=1080px>
+    </div> -->
+    <div id="video-container">
+      <video src="/video/scenery-1080.m4v" id="video" playsinline></video>
+    </div>
+
+    <canvas id="matter-canvas" width=1920px height=1080px></canvas>
+    <button id="add-device">Add device</button>
+    <button id="pause-layout">Pause layout</button>
+    <button id="resume-layout">Resume layout</button>
+    <button id="send-layout-to-devices">Send layout to devices</button>
+    <button id="play-video">Play video</button>
+    <button id="pause-video">Pause video</button>
+  </div>
+
+  <script>
+    var serverURL = "http://localhost:3000";
+
+    var canvas = document.getElementById("matter-canvas");
+    var ctx = canvas.getContext('2d');
+
+    var srcVideoWidth = 1920;
+    var srcVideoHeight = 1080;
+    var center = {
+      x: srcVideoWidth/2,
+      y: srcVideoHeight/2
+    };
+
+    var initialDevices = 3;
+    var addedDevices = 0;
+    var currentScaleFactor = 1;
+    var runningAvgMotion = [];
+    var runningAvgSpan = 5;
+    var pauseWhenStill = true;
+    var manuallyStopLayout = false;
+
+    var socket;
+    openWebsocket();
+
+    var engine = Matter.Engine.create();
+    engine.world.gravity.y = 0;
+
+    var render = Matter.Render.create({
+      canvas: canvas,
+      engine: engine,
+      options: {
+        wireframes: false,
+        background: '#000000',
+        width: srcVideoWidth,
+        height: srcVideoHeight
+      }
+    })
+    var runner = Matter.Runner.create();
+
+    var tangibleCategory = 0x0001;
+    var intangibleCategory = 0x0002;
+
+    var centerCircle = Matter.Bodies.circle(center.x, center.y, 40, { 
+      isStatic: true,
+      collisionFilter: {
+        category: intangibleCategory,
+        mask: intangibleCategory
+      }
+    });
+
+    // make a bunch of phone-sized rectangles
+
+    var deviceFrames = [];
+    
+    // // makes it easy to populate fake devices
+    // for(i = 0; i < initialDevices; i++){
+    //   var deviceFrameSize = generateDeviceFrameSize();
+    //   var deviceFrame = generateDeviceFrame(/* add id param here */, center.x, center.y, deviceFrameSize.width, deviceFrameSize.height);
+
+    //   deviceFrames.push(deviceFrame)
+    // }
+
+    // set up the engine
+    Matter.World.add(engine.world, [centerCircle]);
+    Matter.World.add(engine.world, deviceFrames.map( deviceFrame => deviceFrame.rectangle));
+    Matter.World.add(engine.world, deviceFrames.map( deviceFrame => deviceFrame.constraint));
+
+    // hook into events
+    Matter.Events.on(engine, 'beforeUpdate', function(event){
+      if(deviceFrames.length == 0){ return }
+      // prevent frames from rotating at all
+      for(frame of deviceFrames){
+        Matter.Body.setAngle(frame.rectangle, 0)
+      }
+
+      // pause the engine when things have settled down
+      var totalSpeed = deviceFrames
+        .map( deviceFrame => deviceFrame.rectangle.speed)
+        .reduce((a, b) => (a + b))
+      
+      var avgMotion = totalSpeed / deviceFrames.length;
+      // console.log("average motion: " + avgMotion);
+
+      runningAvgMotion.push(avgMotion);
+
+      var avgMotionRolling = 0;
+      for(i = runningAvgMotion.length - runningAvgSpan; i < runningAvgMotion.length; i++) {
+        avgMotionRolling += runningAvgMotion[i];
+      }
+      avgMotionRolling /= runningAvgSpan;
+
+      console.log("rolling average motion: " + avgMotionRolling);
+      
+      if(
+        (pauseWhenStill && avgMotionRolling != 'NaN' && avgMotionRolling < weightedMotionThreshold(deviceFrames.length)) ||
+        manuallyStopLayout
+        ){
+        // pause engine
+        runner.enabled = false;
+        runningAvgMotion = [];
+        scaleDeviceFramesToVideoFrame();
+
+        if(manuallyStopLayout){ manuallyStopLayout = false; }
+      }
+    });
+
+    // set up UI
+    document.getElementById('add-device').addEventListener('click', function(){
+      pauseWhenStill = false;
+      manuallyStopLayout = false;
+      addDeviceFrame();
+    })
+
+    document.getElementById('pause-layout').addEventListener('click', function(){
+      manuallyStopLayout = true;
+    })
+
+    document.getElementById('resume-layout').addEventListener('click', function(){
+      runner.enabled = true;
+    })
+
+    document.getElementById('send-layout-to-devices').addEventListener('click', function(){
+      sendLayoutToServer();
+    })
+
+    document.getElementById('play-video').addEventListener('click', function(){
+      playVideo();
+    })
+
+    document.getElementById('pause-video').addEventListener('click', function(){
+      pauseVideo();
+    })
+
+
+    Matter.Runner.start(runner, engine);
+    Matter.Render.run(render);
+    canvas.setAttribute("style", "background-size: contain; background-position: initial initial; background-repeat: initial initial;"); // workaround for matter.js bug
+    
+    function weightedMotionThreshold(devices){
+      if(devices < 4){
+        return 0.002
+      } else if(devices < 8){
+        return 0.02
+      } else {
+        return 0.2
+      }
+    }
+
+    function addDeviceFrame(id, width, height){
+      if(!id){ return new Error('no id supplied') };
+
+      addedDevices++;
+
+      var deviceFrameSize;
+      if(width && height){
+        deviceFrameSize = { width: width, height: height }
+      } else {
+        deviceFrameSize = generateDeviceFrameSize();
+      }
+
+      var x, y;
+      
+      console.log('addedDevices: ' + addedDevices)
+
+      if(addedDevices == 1){
+        console.log('spawning new frame at centre')
+        x = center.x
+        y = center.y
+      } else if(addedDevices % 3 == 0){
+        // center left
+        x = -deviceFrameSize.width/2;
+        y = center.y;
+      } else if(addedDevices % 2 == 0){
+        // top right
+        x = srcVideoWidth + deviceFrameSize.width/2;
+        y = -deviceFrameSize.height/2;
+      } else {
+        // center bottom
+        console.log('spawning new frame at centre bottom')
+        x = center.x;
+        y = srcVideoHeight + deviceFrameSize.height/2
+      }
+
+      var deviceFrame = generateDeviceFrame(id, x, y, deviceFrameSize.width, deviceFrameSize.height);
+      Matter.Body.scale(deviceFrame.rectangle, currentScaleFactor, currentScaleFactor);
+      console.log(deviceFrame);
+      deviceFrames.push(deviceFrame);
+
+      Matter.World.add(engine.world, [deviceFrames[deviceFrames.length - 1].rectangle])
+      Matter.World.add(engine.world, [deviceFrames[deviceFrames.length - 1].constraint])
+      runner.enabled = true;
+      pauseWhenStill = true;
+    }
+
+    function removeDeviceFrame(id){
+      addedDevices--;
+      
+      var removedFrameIndex = deviceFrames.findIndex( deviceFrame => {
+        return deviceFrame.id == id
+      })
+
+      var rectToRemove = deviceFrames[removedFrameIndex].rectangle
+      var constraintToRemove = deviceFrames[removedFrameIndex].constraint
+
+      deviceFrames.splice(removedFrameIndex, 1);
+
+      Matter.World.remove(engine.world, rectToRemove)
+      Matter.World.remove(engine.world, constraintToRemove)
+
+      runner.enabled = true;
+      pauseWhenStill = true;
+    }
+
+    function scaleDeviceFramesToVideoFrame(){
+      // if the device agglomeration is wider than the source video, scale it down a bit and let it settle again
+      console.log(deviceFrames);
+      
+      var bounds = deviceFrames.map( deviceFrame => deviceFrame.rectangle.bounds)
+
+      var highestXPosValue = Math.max(...bounds.map(bound => bound.max.x))  
+      var lowestXPosValue = Math.min(...bounds.map(bound => bound.min.x))
+
+      var safeZoneFactor = 0.15;
+      var safeZone = { 
+        max: srcVideoWidth + srcVideoWidth * safeZoneFactor, 
+        min: 0 - srcVideoWidth * safeZoneFactor
+      };
+
+
+      if(highestXPosValue > safeZone.max || lowestXPosValue < safeZone.min){
+        currentScaleFactor *= 0.9;
+        for(frame of deviceFrames){
+          Matter.Body.scale(frame.rectangle, currentScaleFactor, currentScaleFactor);
+        }
+        runner.enabled = true;
+      } else {
+        console.log('layout succeeded');
+        sendLayoutToServer();
+      }
+    }
+
+    function generateDeviceFrame(id, centerX, centerY, width, height){
+      var deviceFrame = { 
+        id: id,
+        originalSize: { 
+          width: width, 
+          height: height
+        } 
+      };
+
+      deviceFrame.rectangle = Matter.Bodies.rectangle(
+        centerX, 
+        centerY, 
+        width, 
+        height, 
+        { restitution: 0,
+          friction: 0.01,
+          collisionFilter: {
+            category: tangibleCategory,
+            mask: tangibleCategory
+          },
+          render: {
+            opacity: 0.3
+          }
+        }
+      )
+
+      deviceFrame.constraint = Matter.Constraint.create({
+        bodyA: deviceFrame.rectangle,
+        bodyB: centerCircle,
+        length: 0,
+        stiffness: 0.0005,
+        damping: 1
+      })
+
+      return(deviceFrame);
+    }
+
+    function generateDeviceFrameSize(){
+      // loosely grabbed from http://screensiz.es
+      var deviceSizeRanges = {
+        phone: {
+          minWidth: 480,
+          maxWidth: 1440,
+          minHeight: 800,
+          maxHeight: 2688
+        }
+        // , tablet: {
+        //   minWidth: 0,
+        //   maxWidth: 0,
+        //   minHeight: 0,
+        //   maxHeight: 0
+        // },
+      }
+
+      // create random dimensions
+      var frameWidth = getRandomIntInclusive(deviceSizeRanges.phone.minWidth, deviceSizeRanges.phone.maxWidth);
+
+      var frameHeight = getRandomIntInclusive(deviceSizeRanges.phone.minHeight, deviceSizeRanges.phone.maxHeight);
+
+      // toss a coin to see if it should be in portrait or landscape mode
+      var isPortraitOrientation = getRandomBool;
+
+      // "rotate" the frame 
+      if(!isPortraitOrientation) {
+        var w = frameWidth;
+        frameWidth = frameHeight;
+        frameHeight = w;
+      }
+
+      console.log("generated device frame: " + frameWidth + "px x " + frameHeight + "px");
+
+      return {
+        width: frameWidth,
+        height: frameHeight
+      }
+    }
+
+    // from SO: https://stackoverflow.com/questions/36756331/js-generate-random-boolean
+    function getRandomBool(){
+      return Math.random() >= 0.5
+    }
+
+    // from MDN: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/random
+    function getRandomIntInclusive(min, max) {
+      min = Math.ceil(min);
+      max = Math.floor(max);
+      return Math.floor(Math.random() * (max - min + 1)) + min; //The maximum is inclusive and the minimum is inclusive 
+    }
+
+    function openWebsocket(){
+      // socket config
+      socket = new WebSocket('ws://localhost:8080');
+
+      socket.addEventListener('open', (event) => {
+        socket.send('isAdmin');
+      });
+
+      socket.addEventListener('message', (event) => {
+        console.log(event.data)
+        if(event.data == "success"){
+          console.log('socket open & connected as videotile admin')
+          return
+        }
+
+        const message = JSON.parse(event.data)
+        if(message.payload !== undefined){
+          const payload = message.payload
+          if(payload.action == "addClient"){
+            addDeviceFrame(payload.data.clientId, payload.data.w, payload.data.h)
+          } else if(message.payload.action == "removeClient"){
+            removeDeviceFrame(payload.data)
+          }
+        }
+      })
+    }
+
+    function sendLayoutToServer(){
+      console.log(deviceFrames);
+
+      // it's essential to round all these values before sending -- if the client has to deal with floats for canvas calculations memory usage goes up by an order of magnitude
+      
+      var deviceFrameLayout = deviceFrames.map( deviceFrame => {
+        var verts = deviceFrame.rectangle.vertices
+        var roundedVerts = verts.map( vertex => {
+          return {
+            index: vertex.index,
+            x: Math.round(vertex.x),
+            y: Math.round(vertex.y)
+          }
+        })
+        
+        var roundedBounds = {
+          min: {
+            x: Math.round(deviceFrame.rectangle.bounds.min.x),
+            y: Math.round(deviceFrame.rectangle.bounds.min.y)
+          },
+          max: {
+            x: Math.round(deviceFrame.rectangle.bounds.max.x),
+            y: Math.round(deviceFrame.rectangle.bounds.max.y)
+          }
+        }
+
+        return {
+          id: deviceFrame.id,
+          originalSize: deviceFrame.originalSize,
+          bounds: roundedBounds,
+          vertices: roundedVerts
+        }
+      })
+
+      var payload = {
+        srcVideoSize: { 
+          width: srcVideoWidth, 
+          height: srcVideoHeight 
+        },
+        frameLayout: deviceFrameLayout
+      }
+      console.log(payload)
+
+      fetch(serverURL + '/update-layout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      }).then( response => {
+        if(response.status == 200){
+          console.log('sent layout to server')
+          // indicate success to user
+        } else {
+          console.log('error sending layout to server')
+          // error message
+        }
+      })
+    }
+
+    function playVideo(){
+      broadcast('play')
+    }
+
+    function pauseVideo(){
+      broadcast('pause')
+    }
+
+    function broadcast(action){
+      fetch(serverURL + '/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          payload: {
+            action: action
+          }
+        })
+      }).then( response => {
+        if(response.status == 200){
+          console.log(action + ' request successful')
+          // indicate success to user
+        } else {
+          console.log('error on ' + action + ' request')
+          // error message
+        }
+      })
+    }
+  </script>
+</body>
+<style>
+
+  #view-container {
+    transform: scale(0.5);
+  }
+
+  #video {
+    opacity: 0.3;
+  }
+
+  #video-container {
+    position: absolute;
+    width: 1920px;
+    height: 1080px;
+    top: 0;
+    left: 0;
+    background-color: #000000;
+    z-index: -99;
+  }
+  
+  #matter-canvas {
+    margin: 0;
+    width: 1920px;
+    height: 1080px;
+  }
+
+</style>

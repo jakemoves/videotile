@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<head>
+	<link href="normalize.css" rel="stylesheet"> 
+	<link href="stylesheet.css" rel="stylesheet"> 
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+</head>
+<body>
+	<!-- this video must not have an audio track -->
+	<video id="video" width="1920" height="1080" src="/video/scenery-1080.m4v" type="video/mp4" loop playsinline preload="auto" muted></video>
+
+	<canvas id="canvas1" width="1920" height="1080"></canvas>
+
+	<canvas id="canvas2"></canvas>
+	
+	<button id="play-video">Tap here</button>
+
+	<script type="text/javascript">
+
+		var video = document.getElementById("video");
+		var videoHasPlayedOnce = false
+
+		// on iOS, video won't play via scripting if the user hasn't manually played it once 
+		var manualPlayButton = document.getElementById('play-video')
+		manualPlayButton.addEventListener("click", () => {
+			video.play().then( () => {
+				videoHasPlayedOnce = true
+			}).catch( error => {
+				console.log(error)
+			})
+			manualPlayButton.classList.add('hidden')
+		});
+
+		// socket config
+		const socketURL = 
+			"ws://" + location.hostname + ":8080"
+		const socket = new WebSocket(socketURL);
+
+		var clientId;
+		var canvas1VideoLayout = { x: 0, y: 0, w: 0, h: 0};
+		var interCanvasMapping;
+		var request
+
+		var canvas1 = document.getElementById("canvas1");
+		var context1 = canvas1.getContext("2d");
+		var canvas2 = document.getElementById("canvas2");
+		var context2 = canvas2.getContext("2d");
+		var drawOnceOnly
+
+
+		video.addEventListener('canplay', () => {
+			console.log('video.canplay')
+			video.play().catch( error => {
+				// this error is expected on iOS...
+				console.log(error)
+			})
+			video.pause()
+			video.currentTime = 0;
+
+			drawOnceOnly = true
+			drawScaledVideoFrame();
+		})
+		video.addEventListener("play", () => {
+			console.log('video is playing')
+		})
+		video.addEventListener("pause", () => {
+			console.log('video is paused')
+		})
+
+		// initial canvas setup
+		canvas2.setAttribute('width', document.documentElement.clientWidth);
+		canvas2.setAttribute('height', document.documentElement.clientHeight);
+
+		socket.addEventListener('open', (event) => {
+			var width = document.documentElement.clientWidth;
+			var height = document.documentElement.clientHeight;
+
+			socket.send('{ "w": ' + width + ', "h": ' + height + '}');
+			
+			console.log('socket open!')
+		});
+
+		socket.addEventListener('message', (event) => {
+			console.log('message from server: ' + event.data);
+
+			const message = JSON.parse(event.data)
+			console.log(message)
+			const payload = message.payload;
+
+			switch(payload.action){
+				case 'play':
+					startPlayback();
+					break;
+				case 'pause':
+					video.pause();
+					cancelAnimationFrame(request)
+					drawOnceOnly = true
+					break;
+				// case 'reset':
+				// 	video.pause();
+				// 	video.currentTime = 0;
+				// 	break;
+				// case 'restart':
+				// 	video.pause();
+				// 	video.currentTime = 0;
+				// 	video.play();
+				// 	break;
+				case 'relayout':
+					console.log(payload.data);
+					layoutDeviceFrame(payload.data);
+					break;
+				case 'setClientId':
+					console.log('setClientId');
+					clientId = payload.data;
+					console.log(clientId);
+					break;
+				default:
+					break;
+			}
+		});
+
+		// canvas manipulation
+		// TODO might want to do with requestanimationframe?
+
+		layoutDeviceFrame = (layoutDetails) => {
+			// lay out the canvases (larger than viewport)
+
+			canvas1.setAttribute('width', layoutDetails.srcVideoSize.width);
+			canvas1.setAttribute('height', layoutDetails.srcVideoSize.height);
+
+			canvas2.setAttribute('width', layoutDetails.frame.originalSize.width);
+			canvas2.setAttribute('height', layoutDetails.frame.originalSize.height);
+
+			// canvas 2 is our display canvas, so position it for this viewport
+			canvas2.style.top = "0px";
+			canvas2.style.left = "0px";
+
+			// calculate video position / dimensions for canvas 1
+			canvas1VideoLayout.x = 0
+			canvas1VideoLayout.y = 0
+			canvas1VideoLayout.w = layoutDetails.srcVideoSize.width
+			canvas1VideoLayout.h = layoutDetails.srcVideoSize.height
+
+			// calculate mapping from canvas1 (actual raster size of video) to canvas2 (actual raster size of device)
+			interCanvasMapping = {
+				src: {
+					x: layoutDetails.frame.vertices[0].x,
+					y: layoutDetails.frame.vertices[0].y,
+					w: layoutDetails.frame.bounds.max.x - layoutDetails.frame.bounds.min.x,
+					h: layoutDetails.frame.bounds.max.y - layoutDetails.frame.bounds.min.y,
+				},
+				dest: {
+					x: 0,
+					y: 0,
+					w: layoutDetails.frame.originalSize.width,
+					h: layoutDetails.frame.originalSize.height
+				}
+			}
+
+			// draw one frame
+			drawOnceOnly = true
+			drawScaledVideoFrame()
+		}
+
+		function drawScaledVideoFrame(){
+			// console.log('drawing video frame')
+
+			// color the background
+			context2.fillStyle = "blue";
+			context2.fillRect(0, 0, canvas2.width, canvas2.height);
+			
+			context1.drawImage(video, canvas1VideoLayout.x, canvas1VideoLayout.y, canvas1VideoLayout.w, canvas1VideoLayout.h);
+
+			if(interCanvasMapping === undefined){
+				return;
+			}
+
+			// 
+			// this method uses get and put imagedata
+			// 
+
+			// var croppedImage = context1.getImageData(
+			// 	interCanvasMapping.src.x, // source x
+			// 	interCanvasMapping.src.y, // source y
+			// 	interCanvasMapping.src.w, // source width
+			// 	interCanvasMapping.src.h, // source height
+			// )
+			// if(interCanvasMapping.src.w != interCanvasMapping.dest.w){
+			// 	console.log("error: scaling is not supported yet")
+			// 	return
+			// }
+			// context2.putImageData(
+			// 	croppedImage,
+			// 	interCanvasMapping.dest.x,
+			// 	interCanvasMapping.dest.y
+			// )
+
+			// 
+			// this method uses drawImage (works in one call + scales)
+			// 
+
+			context2.drawImage(
+				canvas1, 
+				interCanvasMapping.src.x, // source x
+				interCanvasMapping.src.y, // source y
+				interCanvasMapping.src.w, // source width
+				interCanvasMapping.src.h, // source height
+				interCanvasMapping.dest.x, // dest x
+				interCanvasMapping.dest.y, // dest y
+				interCanvasMapping.dest.w, // dest width
+				interCanvasMapping.dest.h // dest height
+			)
+
+			if(!drawOnceOnly){
+				request = requestAnimationFrame(drawScaledVideoFrame)
+			}
+		}
+
+		startPlayback = () => {
+			video.play();
+			drawOnceOnly = false
+			request = requestAnimationFrame(drawScaledVideoFrame)
+		}
+	</script>
+</body>
